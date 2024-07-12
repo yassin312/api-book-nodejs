@@ -2,7 +2,7 @@ const express = require('express');
 const sqlite3 = require('sqlite3').verbose();
 
 const app = express();
-const port = process.env.PORT || 3000;
+const port = process.env.PORT || 8000;
 
 const db = new sqlite3.Database('./livre.db', (err) => {
   if (err) {
@@ -41,14 +41,142 @@ app.get('/livres/:livres.id', (req, res) => {
 });
 
 //POST /livre
+app.post('/livre', (req, res) => {
+  const { titre, annee_publication, quantite, auteur } = req.body;
+  const quantiteInsert = quantite !== undefined ? quantite : 1;
+
+  db.get('SELECT id FROM auteurs WHERE id = ?', [auteur], (err, row) => {
+    if (err) {
+      console.error(err.message);
+      res.status(500).send('Internal server error');
+    } else if (!row) {
+      res.status(404).send('Auteur inexistant');
+    } else {
+      db.run('INSERT INTO livres(titre, annee_publication, quantite) VALUES (?, ?, ?)', [titre, annee_publication, quantiteInsert], function(err) {
+        if (err) {
+          console.error(err.message);
+          res.status(500).send('Internal server error');
+        } else {
+          const id_livre = this.lastID;
+          db.run('INSERT INTO auteur_livre(id_livre, id_auteur) VALUES (?, ?)', [id_livre, auteur], function(err) {
+            if (err) {
+              console.error(err.message);
+              res.status(500).send('Internal server error');
+            } else {
+              res.status(201).send({ id: id_livre, titre, annee_publication, quantite: quantiteInsert, auteur: auteur });
+            }
+          });
+        }
+      });
+    }
+  });
+});
 
 //PUT /livre/{id}
+app.put('/livre/id_livre', (req, res) => {
+  const { titre, annee_publication, auteur } = req.body;
+
+  db.get('SELECT id FROM auteurs WHERE id = ?', [auteur], (err, row) => {
+    if (err) {
+      console.error(err.message);
+      res.status(500).send('Internal server error');
+    } else if (!row) {
+      res.status(404).send('Auteur inexistant');
+    } else {
+      // L'auteur existe, insérer le livre
+      db.run('UPDATE livres(titre, annee_publication) VALUES (?, ?) WHERE livres.id = ?', [titre, annee_publication], function(err) {
+        if (err) {
+          console.error(err.message);
+          res.status(500).send('Internal server error');
+        } else {
+          const id_livre = this.lastID;
+          
+          db.run('UPDATE auteur_livre(id_livre, id_auteur) VALUES (?, ?) WHERE livres.id = ?', [id_livre, auteur], function(err) {
+            if (err) {
+              console.error(err.message);
+              res.status(500).send('Internal server error');
+            } else {
+              res.status(201).send({ id: id_livre, titre, annee_publication: id_livre, auteur: auteur });
+            }
+          });
+        }
+      });
+    }
+  });
+});
 
 //GET /livre/{id}/quantite
+app.get('/livres/:id/quantite', (req, res) => {
+  const { id } = req.params;
+  db.get('SELECT liv.titre, quantite - COUNT(emp.id_livre) AS nb_livre FROM livres liv LEFT JOIN emprunt emp ON emp.id_livre = liv.id WHERE liv.id = ? GROUP BY liv.titre', [id], (err, row) => {
+    if (err) {
+      console.error(err.message);
+      res.status(500).send('Internal server error');
+    } else if (!row) {
+      res.status(404).send('Book not found');
+    } else {
+      res.send(row);
+    }
+  });
+});
 
 //PUT /livre/{id}/quantite
+app.put('/livres/:id/quantite', (req, res) => {
+  const { id } = req.params;
+  const { newQty } = req.body;
+
+  db.get('SELECT COUNT(id) AS nbEmprunt FROM emprunt WHERE id_livre = ?', [id], (err, row) => {
+    if (err) {
+      console.error(err.message);
+      return res.status(500).send('Erreur interne du serveur');
+    } else if (!row) {
+      return res.status(404).send('Livre non trouvé');
+    } else {
+      const nbEmprunt = row.nbEmprunt;
+      if (newQty < nbEmprunt) {
+        return res.status(400).send('Nouvelle quantité inférieure au nombre d\'emprunts en cours');
+      } else {
+        db.run('UPDATE livres SET quantite = ? WHERE id = ?', [newQty, id], function(err) {
+          if (err) {
+            console.error(err.message);
+            return res.status(500).send('Erreur interne du serveur');
+          }
+          return res.status(200).send({ message: 'Quantité mise à jour avec succès' });
+        });
+      }
+    }
+  });
+});
 
 //DELETE /livre/{id}
+app.delete('/livre/:id', (req,res) => {
+  const { id } = req.params
+
+  db.get('SELECT id_livre FROM emprunt WHERE id_livre = ?', [id], (err, row) => {
+    
+    if (err){
+      console.error(err.message);
+      res.status(500).send('Internal server error');
+    }
+    else if (row){
+        res.send('Le livre est en cours d emprunt') 
+    }
+    else {
+      db.run('DELETE FROM livres WHERE id = ?', [id], (err,row) => {
+        if (err) {
+          console.error(err.message);
+          res.status(500).send('Internal server error');
+
+        } else if(!row){
+          res.status(404).send('Book not found');
+        } 
+        else {
+          res.send('Livre supprimé avec succès');
+        }
+      });   
+    }
+  });
+});
 
 //GET /auteurs
 app.get('/auteurs', (req, res) => {
@@ -143,9 +271,64 @@ app.delete('/auteur/:id', (req, res) => {
   })
    
 })
+
 //POST /emprunt
+app.post('/emprunt', (req, res) => {
+  const { id_livre,id_auteur } = req.body;
+  const today = new Date();
+
+  // Obtenir les composants de la date
+  const day = String(today.getDate()).padStart(2, '0');
+  const month = String(today.getMonth() + 1).padStart(2, '0'); // Les mois commencent à 0
+  const year = today.getFullYear();
+    
+  const datedujour = `${day}/${month}/${year}`;
+  const strReq = `INSERT INTO emprunt(id_livre, id_personne, date_emprunt) VALUES( ?, ?, ?)`;
+
+  db.get('SELECT quantite FROM livres WHERE id =  ? AND quantite > 0',[id_livre], (err) => {
+    if (err){
+      console.error("Le livre n'est pas empruntable", err.message)
+      res.status(500).send('Internal Server Error') 
+    } else {
+      db.run(strReq, [id_livre, id_auteur, datedujour], function(err){
+        if(err){
+          console.error(err.message)
+          res.status(500).send('Internal Server Error')
+        } else {
+          const id_emprunt = this.lastID;
+          res.status(201).send({ id: id_emprunt });        }
+      })
+    }
+  })
+})
 
 //PUT /Emprunt/{id}
+app.put('/emprunt/:id', (req, res) =>{
+  const { id }=req.params
+  const { dateRetour }=req.body
+
+  db.get('SELECT id FROM emprunt WHERE id = ?', [id], (err, row) =>{
+    if(err){
+      res.status(500).send('Internal server error');
+    } 
+    else if(!row){
+      res.status(404).send('Emprunt non trouvé');
+    } 
+    else{
+      db.run('UPDATE emprunt SET date_retour= ? WHERE id= ?',[dateRetour, id], (err) =>{
+        if(err){
+          res.status(500).send('Internal server error');
+        }
+        else if(!row){
+          res.status(404).send('Emprunt non trouvé');
+        }
+        else {
+          res.send('Emprunt modifié');
+        }
+      });
+    }
+  });
+});
 
 //GET /recherche/{mots}
 
