@@ -11,6 +11,19 @@ const db = new sqlite3.Database('./livre.db', (err) => {
   console.log('Connecté à la BDD.');
 });
 
+
+
+const apiKeyMiddleware = (req, res, next) => {
+  const apiKey = req.headers['x-api-key'];
+  if (!apiKey) {
+    return res.status(401).send('API Key manquante');
+  }
+  if (apiKey !== process.env.API_KEY) {
+    return res.status(403).send('API Key invalide');
+  }
+  next();
+};
+
 app.use(express.json());
 
 // GET all livres
@@ -41,34 +54,45 @@ app.get('/livres/:livres.id', (req, res) => {
 });
 
 //POST /livre
-app.post('/livre', (req, res) => {
+app.post('/livre', apiKeyMiddleware, (req, res) => {
   const { titre, annee_publication, quantite, auteur } = req.body;
+
+  // Log des données reçues
+  console.log('Données reçues:', req.body);
+
+  if (!titre || !annee_publication || !auteur) {
+    return res.status(400).send('Données manquantes');
+  }
+
   const quantiteInsert = quantite !== undefined ? quantite : 1;
 
   db.get('SELECT id FROM auteurs WHERE id = ?', [auteur], (err, row) => {
     if (err) {
-      console.error(err.message);
-      res.status(500).send('Internal server error');
-    } else if (!row) {
-      res.status(404).send('Auteur inexistant');
-    } else {
-      db.run('INSERT INTO livres(titre, annee_publication, quantite) VALUES (?, ?, ?)', [titre, annee_publication, quantiteInsert], function(err) {
-        if (err) {
-          console.error(err.message);
-          res.status(500).send('Internal server error');
-        } else {
-          const id_livre = this.lastID;
-          db.run('INSERT INTO auteur_livre(id_livre, id_auteur) VALUES (?, ?)', [id_livre, auteur], function(err) {
-            if (err) {
-              console.error(err.message);
-              res.status(500).send('Internal server error');
-            } else {
-              res.status(201).send({ id: id_livre, titre, annee_publication, quantite: quantiteInsert, auteur: auteur });
-            }
-          });
-        }
-      });
+      console.error('Erreur lors de la sélection de l\'auteur:', err.message);
+      return res.status(500).send('Internal server error');
+    } 
+
+    if (!row) {
+      return res.status(404).send('Auteur inexistant');
     }
+
+    db.run('INSERT INTO livres(titre, annee_publication, quantite) VALUES (?, ?, ?)', [titre, annee_publication, quantiteInsert], function(err) {
+      if (err) {
+        console.error('Erreur lors de l\'insertion du livre:', err.message);
+        return res.status(500).send('Internal server error');
+      }
+
+      const id_livre = this.lastID;
+
+      db.run('INSERT INTO auteur_livre(id_livre, id_auteur) VALUES (?, ?)', [id_livre, auteur], function(err) {
+        if (err) {
+          console.error('Erreur lors de l\'insertion dans auteur_livre:', err.message);
+          return res.status(500).send('Internal server error');
+        }
+
+        res.status(201).send({ id: id_livre, titre, annee_publication, quantite: quantiteInsert, auteur });
+      });
+    });
   });
 });
 
@@ -331,6 +355,33 @@ app.put('/emprunt/:id', (req, res) =>{
 });
 
 //GET /recherche/{mots}
+
+app.get('/recherche/:recherche', (req, res) => {
+  const { recherche } = req.params;
+  const keywords = recherche.split(' ');
+  
+  let sqlQuery = 'SELECT nom, prenom, titre FROM auteurs aut LEFT JOIN auteur_livre autliv ON autliv.id_auteur = aut.id LEFT JOIN livres liv ON autliv.id_livre=liv.id WHERE';
+  const sqlConditions = [];
+  const sqlParams = [];
+  
+  keywords.forEach(keyword => {
+    const condition = '(nom LIKE ? OR prenom LIKE ? OR titre LIKE ?)';
+    sqlConditions.push(condition);
+    sqlParams.push(`%${keyword}%`, `%${keyword}%`, `%${keyword}%`);
+  });
+
+  sqlQuery += sqlConditions.join(' AND ');
+
+  db.all(sqlQuery, sqlParams, (err, rows) => {
+    if (err) {
+      res.status(500).send('Internal server error');
+    } else if (!rows || rows.length === 0) {
+      res.status(404).send('Auteur ou livre introuvable');
+    } else {
+      res.send(rows);
+    }
+  });
+});
 
 
 // Start the server
